@@ -19,14 +19,16 @@
 open Lexing
 open Pre_parser
 open Pre_parser_aux
+open Location
 
 module SSet = Set.Make(String)
+module IMap = Map.Make(Int)
 
 let lexicon : (string, Cabs.loc -> token) Hashtbl.t = Hashtbl.create 17
 let ignored_keywords : SSet.t ref = ref SSet.empty
 
 let reserved_keyword loc id =
-  Diagnostics.fatal_error (loc.Cabs.filename, loc.Cabs.lineno)
+  Diagnostics.fatal_error (loc.filename, loc.lineno)
     "illegal use of reserved keyword `%s'" id
 
 let () =
@@ -118,6 +120,26 @@ let _ =
     types_context := SSet.add id !types_context
   end
 
+let annots_context : rc_annot_type IMap.t ref = ref IMap.empty
+
+let _ =
+  set_annot_type := begin fun i t ->
+    annots_context := IMap.add i t !annots_context
+  end
+
+let annot_index = ref 0
+
+let assert_index = ref Camlcoq.Z.zero
+let next_assert () = let n = !assert_index in assert_index := Camlcoq.Z.add n Camlcoq.Z.one; n
+
+let handle_invalid_annot : type a b. ?loc:Cabs.loc -> b ->  (a -> b) -> a -> b =
+    fun ?loc default f a ->
+  try f a with Rc_annot.Invalid_annot(err_loc, msg) ->
+  begin
+    Panic.wrn None "[%s] Invalid annotation (ignored).\n  → %s"
+          (location_to_string err_loc) msg
+  end; default
+
 let init filename channel : Lexing.lexbuf =
   let lb = Lexing.from_channel channel in
   lb.lex_curr_p <- {lb.lex_curr_p with pos_fname = filename; pos_lnum = 1};
@@ -131,10 +153,10 @@ let currentLoc =
   in
   fun lb ->
     let p = Lexing.lexeme_start_p lb in
-    Cabs.({ lineno   = p.Lexing.pos_lnum;
-            filename = p.Lexing.pos_fname;
-            byteno   = p.Lexing.pos_cnum;
-            ident    = getident ();})
+    ({ lineno   = p.Lexing.pos_lnum;
+       filename = p.Lexing.pos_fname;
+       byteno   = p.Lexing.pos_cnum;
+       ident    = getident ();})
 
 (* Error reporting *)
 
@@ -193,7 +215,7 @@ let combine_encodings loc e1 e2 =
   else if e2 = Cabs.EncNone then e1
   else if e1 = e2 then e1
   else Diagnostics.fatal_error
-           Cabs.(loc.filename, loc.lineno)
+           (loc.filename, loc.lineno)
            "unsupported non-standard concatenation of string literals"
 
 (* Handling of characters and escapes in string and char constants *)
@@ -385,6 +407,15 @@ rule initial = parse
                                   { let enc = encoding_of e in
                                     let l = string_literal lexbuf.lex_start_p enc [] lexbuf in
                                     STRING_LITERAL(enc, l, currentLoc lexbuf) }
+  | "[[rc::" ([^ '(' ']' '\n']* as n) "("
+                                  { let i = !annot_index in annot_index := i + 1;
+                                    let a = rc_annot_args lexbuf in
+                                    RC_ATTR (i, {Rc_annot.rc_attr_id = {elt = n; loc = currentLoc lexbuf};
+                                                 Rc_annot.rc_attr_args = a }) }
+  | "[[rc::" ([^ '(' ']' '\n']* as n) "]]"
+                                  { let i = !annot_index in annot_index := i + 1;
+                                    RC_ATTR (i, {Rc_annot.rc_attr_id = {elt = n; loc = currentLoc lexbuf};
+                                                 Rc_annot.rc_attr_args = [] }) }
   | "..."                         { ELLIPSIS(currentLoc lexbuf) }
   | "+="                          { ADD_ASSIGN(currentLoc lexbuf) }
   | "-="                          { SUB_ASSIGN(currentLoc lexbuf) }
@@ -550,6 +581,19 @@ and singleline_comment = parse
   | eof    { () }
   | _      { singleline_comment lexbuf }
 
+and rc_annot_args = parse
+  | ")]]"  { [] }
+  | "\"" ([^ '"']* as a) "\")]]" { [{ Rc_annot.rc_attr_arg_value = {elt = a; loc = currentLoc lexbuf};
+                                      Rc_annot.rc_attr_arg_pieces = [{elt = a; loc = currentLoc lexbuf}] }] }
+  | "\"" ([^ '"']* as a) "\"" whitespace_char_no_newline * ',' whitespace_char_no_newline *
+                                 { { Rc_annot.rc_attr_arg_value = {elt = a; loc = currentLoc lexbuf};
+                                     Rc_annot.rc_attr_arg_pieces = [{elt = a; loc = currentLoc lexbuf}] } :: rc_annot_args lexbuf }
+  | "\"" ([^ '"']* as a) "\"" whitespace_char_no_newline * ',' whitespace_char_no_newline * '\n' whitespace_char_no_newline *
+                                 { new_line lexbuf; { Rc_annot.rc_attr_arg_value = {elt = a; loc = currentLoc lexbuf};
+                                     Rc_annot.rc_attr_arg_pieces = [{elt = a; loc = currentLoc lexbuf}] } :: rc_annot_args lexbuf }
+  | _ as c
+      { fatal_error lexbuf "invalid symbol %C" c }
+
 {
   open Parser.MenhirLibParser.Inter
 
@@ -683,6 +727,24 @@ and singleline_comment = parse
       | Pre_parser.QUESTION loc -> loop (Parser.QUESTION loc)
       | Pre_parser.RBRACE loc -> loop (Parser.RBRACE loc)
       | Pre_parser.RBRACK loc -> loop (Parser.RBRACK loc)
+      | Pre_parser.RC_ATTR (i, a) ->
+          (* combine consecutive annots *)
+          let rec doAttrs str =
+            match Queue.peek tokens with
+            | Pre_parser.RC_ATTR (_, a) -> ignore (Queue.pop tokens); doAttrs (str @ [a])
+            | _ -> str
+          in
+          let attrs = doAttrs [a] in
+          let loc = a.Rc_annot.rc_attr_id.loc in (* is this the right loc? *)
+          (match IMap.find i !annots_context with
+           | FunctionAnnot -> loop (Parser.FUNCTION_ANNOT (handle_invalid_annot ~loc None (fun _ -> Some (Rc_annot.function_annot attrs)) ()))
+           | LoopAnnot -> loop (Parser.LOOP_ANNOT (next_assert (), snd (Rc_annot.loop_annot attrs)))
+           | InlineAnnot -> loop (Parser.INLINE_ANNOT (Option.map (fun a -> (next_assert (), a)) (Rc_annot.raw_expr_annot attrs),
+                                                       a.Rc_annot.rc_attr_id.loc))
+           | GlobalAnnot -> loop (Parser.GLOBAL_ANNOT (handle_invalid_annot ~loc None (fun _ -> Rc_annot.global_annot attrs) ()))
+           | StructAnnot -> loop (Parser.STRUCT_ANNOT (handle_invalid_annot ~loc None (fun _ -> Some(Rc_annot.struct_annot attrs)) ()))
+           | MemberAnnot -> loop (Parser.MEMBER_ANNOT (handle_invalid_annot ~loc None (fun _ -> Some(Rc_annot.member_annot attrs)) ())))
+           (* wrap everything in handle_invalid_annot? *)
       | Pre_parser.REGISTER loc -> loop (Parser.REGISTER loc)
       | Pre_parser.RESTRICT loc -> loop (Parser.RESTRICT loc)
       | Pre_parser.RETURN loc -> loop (Parser.RETURN loc)

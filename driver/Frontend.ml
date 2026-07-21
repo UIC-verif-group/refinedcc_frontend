@@ -43,7 +43,8 @@ let predefined_macros =
     "-D__STDC_NO_ATOMICS__";
     "-D__STDC_NO_COMPLEX__";
     "-D__STDC_NO_THREADS__";
-    "-D__STDC_NO_VLA__"
+    "-D__STDC_NO_VLA__";
+    "-D__refinedc__"
   ] in
   if Version.buildnr = ""
   then macros
@@ -65,6 +66,29 @@ let preprocess ifile ofile =
     if ofile = "-" then None else Some ofile in
   let cmd = List.concat [
     Configuration.prepro;
+    (if Configuration.gnu_toolchain
+     then ["-std=" ^ !option_std]
+     else []);
+    predefined_macros;
+    abi_macros ();
+    (if !Clflags.use_standard_headers
+     then ["-I" ^ Filename.concat !Clflags.stdlib_path "include" ]
+     else []);
+    List.rev !prepro_options;
+    [ifile]
+  ] in
+  let exc = command ?stdout:output cmd in
+  if exc <> 0 then begin
+    if ofile <> "-" then safe_remove ofile;
+    command_error "preprocessor" exc;
+  end
+
+let preprocessC ifile ofile =
+  Diagnostics.raise_on_errors ();
+  let output =
+    if ofile = "-" then None else Some ofile in
+  let cmd = List.concat [
+    Configuration.prepro; ["-C"];
     (if Configuration.gnu_toolchain
      then ["-std=" ^ !option_std]
      else []);
