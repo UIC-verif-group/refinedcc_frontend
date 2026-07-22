@@ -74,7 +74,7 @@ Require Cabs.
 %type<list Cabs.field_group (* Reverse order *)> struct_declaration_list
 %type<Cabs.field_group> struct_declaration
 %type<list Cabs.spec_elem * Cabs.loc> specifier_qualifier_list
-%type<list (option RcAnnot.member_annot * (option Cabs.name * option Cabs.expression)) (* Reverse order *)>
+%type<(option Cabs.name * option Cabs.expression) * list (option RcAnnot.member_annot * (option Cabs.name * option Cabs.expression)) (* Reverse order *)>
   struct_declarator_list
 %type<option Cabs.name * option Cabs.expression> struct_declarator
 %type<list (RcAnnot.string * option Cabs.expression * Cabs.loc) (* Reverse order *)>
@@ -510,7 +510,7 @@ struct_declaration_list:
 
 struct_declaration:
 | decspec = specifier_qualifier_list decls = struct_declarator_list SEMICOLON
-    { Cabs.Field_group (fst decspec) (rev' decls) (snd decspec) }
+    { Cabs.Field_group (fst decspec) ((Some RcAnnot.default_member_annot, fst decls) :: rev' (snd decls)) (snd decspec) }
 (* Extension to C99 grammar needed to parse some GNU header files. *)
 | decspec = specifier_qualifier_list SEMICOLON
     { Cabs.Field_group (fst decspec) [(Some RcAnnot.default_member_annot,(None,None))] (snd decspec) }
@@ -518,6 +518,9 @@ struct_declaration:
 | asrt = static_assert_declaration
     { let '((e, loc_e), (s, loc_s), loc) := asrt in
       Cabs.Field_group_static_assert e loc_e s loc_s loc }
+(* Non-standard *)
+| annot = MEMBER_ANNOT decspec = specifier_qualifier_list decls = struct_declarator_list SEMICOLON
+    { Cabs.Field_group (fst decspec) ((annot, fst decls) :: rev' (snd decls)) (snd decspec) }
 
 specifier_qualifier_list:
 | typ = type_specifier rest = specifier_qualifier_list
@@ -531,12 +534,12 @@ specifier_qualifier_list:
 
 struct_declarator_list:
 | decl = struct_declarator
-    { [(Some RcAnnot.default_member_annot, decl)] }
+    { (decl, []) }
 | declq = struct_declarator_list COMMA declt = struct_declarator
-    { (Some RcAnnot.default_member_annot, declt)::declq }
+    { (fst declq, (Some RcAnnot.default_member_annot, declt)::snd declq) }
 (* Non-standard *)
 | declq = struct_declarator_list COMMA annot = MEMBER_ANNOT declt = struct_declarator
-    { (annot, declt)::declq }
+    { (fst declq, (annot, declt)::snd declq) }
 
 struct_declarator:
 | decl = declarator
