@@ -671,6 +671,9 @@ and pp_type_expr_rec : unit pp option -> rec_mode -> type_expr pp =
             fprintf ff "struct %a [@@{type} %a ]"
               (pp_arg true) tya
               (pp_sep " ; " (pp_arg false)) tyas
+        | "function_ptr"                  ->
+            fprintf ff "function_ptr (globalenv prog)";
+            List.iter (fprintf ff " %a" (pp_arg true)) tyas
         | _                        ->
             default ()
   and pp_arg wrap ff tya =
@@ -1303,7 +1306,8 @@ let rec func_deps_expr locals e acc =
   | EConditional (e, e1, e2) -> func_deps_expr locals e (func_deps_expr locals e1 (func_deps_expr locals e2 acc))
   | ECast (_, e) -> func_deps_expr locals e acc
   | ECompound (_, i) -> func_deps_init locals i acc
-  | ECall ({edesc = EVar i}, es) -> List.fold_left (fun acc e -> func_deps_expr locals e acc) (fst acc, i.name :: snd acc) es
+  | ECall ({edesc = EVar i}, es) -> List.fold_left (fun acc e -> func_deps_expr locals e acc)
+      (match List.find_opt (fun n -> n = i.name) locals with Some _ -> acc | None -> (i.name :: fst acc, snd acc)) es
   | ECall (_, es) -> List.fold_left (fun acc e -> func_deps_expr locals e acc) acc es
 
 and func_deps_init locals i acc =
@@ -1380,7 +1384,7 @@ let pp_proof : string -> Coq_path.t -> C.fundef -> import list -> string list
   let func_annot = match def.fd_annot with Some annot -> annot | None -> assert false
   in
   pp "@[<v 2>Section proof_%s.@;" func_name;
-  pp "Context `{!typeG OK_ty Σ} `{!globalG OK_ty Σ} (Espec : ext_spec OK_ty).";
+  pp "Context `{!typeG OK_ty Σ} `{!globalG OK_ty Σ}.";
   List.iter (pp "@;%s.") ctxt;
 
   (* Statement of the typing proof. *)
@@ -1413,8 +1417,9 @@ let pp_proof : string -> Coq_path.t -> C.fundef -> import list -> string list
     let pp_impl ff def =
       fprintf ff "f_%s" func_name;
     in
-    let pp_global f = pp "global_locs !! \"%s\" = Some global_%s →@;" f f in
-    List.iter pp_global used_globals;
+    (* Ignoring this for now since we compute global locs from the env. We could quantify over them instead.
+    let pp_global f = pp "Genv.find_symbol (globalenv prog) _%s = Some global_%s →@;" f f in
+    List.iter pp_global used_globals;*)
     (*let pp_prod = pp_as_prod (pp_simple_coq_expr true) in
     let pp_global_type f =
       match List.assoc_opt f ast.global_vars with
@@ -1438,13 +1443,13 @@ let pp_proof : string -> Coq_path.t -> C.fundef -> import list -> string list
       pp "adr2val global_%s ◁ᵥ|tptr (type_of_function f_%s)| global_%s @@ " f f f;
       begin
         match inlined_def with
-        | Some(def) -> pp "inline_function_ptr Espec (globalenv prog) %a" pp_impl def
-        | None      -> pp "function_ptr Espec (globalenv prog) type_of_%s" f
+        | Some(def) -> pp "inline_function_ptr (globalenv prog) %a" pp_impl def
+        | None      -> pp "function_ptr (globalenv prog) type_of_%s" f
       end;
       pp " -∗@;"
     in
     List.iter pp_dep used_functions;
-    pp "%styped_function Espec (globalenv prog) %a type_of_%s.@]@;" prefix pp_impl def func_name
+    pp "%styped_function (globalenv prog) %a type_of_%s.@]@;" prefix pp_impl def func_name
   end;
 
   (* We have a manual proof. *)
